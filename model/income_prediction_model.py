@@ -63,12 +63,15 @@ preprocessor = ColumnTransformer(
 model = Pipeline(steps=[
     ('preprocessor', preprocessor),
     ('regressor', xgb.XGBRegressor(
-        n_estimators=100,
-        learning_rate=0.1,
-        max_depth=5,
-        min_child_weight=1,
+        n_estimators=200,
+        learning_rate=0.05,
+        max_depth=6,
+        min_child_weight=2,
         subsample=0.8,
         colsample_bytree=0.8,
+        gamma=0.1,
+        reg_alpha=0.1,
+        reg_lambda=1,
         random_state=42
     ))
 ])
@@ -182,74 +185,24 @@ plt.savefig('income_prediction_actual_vs_predicted.png')
 plt.close()
 
 # Example prediction function
-def predict_income(occupation, upi_txns_month, mobile_recharge_freq, night_light,
-                  education, is_urban, bill_payment_consistency, ecommerce_freq,
-                  skill_level, household_size, market_density, public_transport_access,
-                  housing_type):
+def predict_income(features_dict):
     """
     Make income prediction for a new customer
     """
-    input_data = pd.DataFrame({
-        'occupation': [occupation],
-        'upi_txns_month': [upi_txns_month],
-        'mobile_recharge_freq': [mobile_recharge_freq],
-        'night_light': [night_light],
-        'education': [education],
-        'is_urban': [is_urban],
-        'bill_payment_consistency': [bill_payment_consistency],
-        'ecommerce_freq': [ecommerce_freq],
-        'skill_level': [skill_level],
-        'household_size': [household_size],
-        'market_density': [market_density],
-        'public_transport_access': [public_transport_access],
-        'housing_type': [housing_type]
-    })
-    
+    input_data = pd.DataFrame([{col: features_dict.get(col, 0) for col in features}])
     prediction = model.predict(input_data)[0]
     return round(prediction, 2)
 
 # Example usage
 print("\nExample predictions:")
-examples = [
-    {
-        'occupation': 'Small Shop Owner',
-        'upi_txns_month': 30,
-        'mobile_recharge_freq': 'Weekly',
-        'night_light': 70,
-        'education': 'Graduate',
-        'is_urban': 1,
-        'bill_payment_consistency': 1,
-        'ecommerce_freq': 8,
-        'skill_level': 'Skilled',
-        'household_size': 3,
-        'market_density': 0.6,
-        'public_transport_access': 1,
-        'housing_type': 'Pucca'
-    },
-    {
-        'occupation': 'Farmer',
-        'upi_txns_month': 5,
-        'mobile_recharge_freq': 'Monthly',
-        'night_light': 40,
-        'education': 'Primary',
-        'is_urban': 0,
-        'bill_payment_consistency': 0,
-        'ecommerce_freq': 2,
-        'skill_level': 'Semi-Skilled',
-        'household_size': 5,
-        'market_density': 0.3,
-        'public_transport_access': 1,
-        'housing_type': 'Semi-Pucca'
-    }
-]
-
+example1 = {col: 0 for col in features}
+example1.update({'var_1': 100, 'var_2': 0.8, 'var_3': 1.0, 'var_4': 500, 'var_5': 0.5})
+example2 = {col: 0 for col in features}
+example2.update({'var_1': 50, 'var_2': 0.3, 'var_3': 0.5, 'var_4': 200, 'var_5': 0.2})
+examples = [example1, example2]
 for i, example in enumerate(examples, 1):
-    prediction = predict_income(**example)
-    print(f"\nExample {i}:")
-    print(f"Occupation: {example['occupation']}")
-    print(f"Education: {example['education']}")
-    print(f"Skill Level: {example['skill_level']}")
-    print(f"Predicted Income: ₹{prediction:,.2f}")
+    prediction = predict_income(example)
+    print(f"Example {i} prediction: {prediction:.2f}")
 
 # Cross-validation score
 cv_scores = cross_val_score(model, X, y, cv=5, scoring='r2')
