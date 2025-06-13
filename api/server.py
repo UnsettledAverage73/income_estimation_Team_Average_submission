@@ -11,7 +11,7 @@ import pickle
 import pandas as pd
 import numpy as np
 import logging
-from repayment_capability_model import predict_repayment_capability
+from model.repayment_capability_model import predict_repayment_capability
 
 # Configure logging
 logging.basicConfig(
@@ -192,7 +192,7 @@ async def predict_combined(request: PredictionRequest):
 @app.get("/feature-list")
 async def get_feature_list():
     """Return the list of required features for prediction"""
-    from repayment_capability_model import features as repayment_features
+    from model.repayment_capability_model import features as repayment_features
     # Assuming income model uses the same features
     return {
         "features": repayment_features,
