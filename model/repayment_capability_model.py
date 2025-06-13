@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.preprocessing import StandardScaler, OneHotEncoder, MinMaxScaler
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import mean_squared_error, r2_score
@@ -27,6 +27,10 @@ y = data['target_income']
 mask = ~(X.isna().any(axis=1) | y.isna())
 X = X[mask]
 y = y[mask]
+
+# Scale target variable to 0-1 range
+income_scaler = MinMaxScaler()
+y_scaled = income_scaler.fit_transform(y.values.reshape(-1, 1)).ravel()
 
 # Preprocessing
 numeric_transformer = Pipeline(steps=[('scaler', StandardScaler())])
@@ -57,33 +61,41 @@ model = Pipeline(steps=[
 ])
 
 print("\nTraining model on the entire dataset...")
-model.fit(X, y)
-y_pred = model.predict(X)
-mse = mean_squared_error(y, y_pred)
-r2 = r2_score(y, y_pred)
-print(f"Training MSE: {mse:.2f}")
+model.fit(X, y_scaled)
+y_pred_scaled = model.predict(X)
+mse = mean_squared_error(y_scaled, y_pred_scaled)
+r2 = r2_score(y_scaled, y_pred_scaled)
+print(f"Training MSE: {mse:.4f}")
 print(f"Training R2: {r2:.3f}")
 
-# Save the model
+# Save the model and scaler
 with open('repayment_capability_model.pkl', 'wb') as f:
-    pickle.dump(model, f)
-print("\nModel saved as 'repayment_capability_model.pkl'")
+    pickle.dump((model, income_scaler), f)
+print("\nModel and scaler saved as 'repayment_capability_model.pkl'")
 
-def predict_repayment_capability(features_dict):
+def predict_repayment_capability(features_dict, return_actual_income=False):
     """
-    Predict income (as a proxy for repayment capability) for a new customer
+    Predict repayment capability for a new customer on a 0-1 scale
     Parameters:
     features_dict (dict): Dictionary containing feature values for the customer
+    return_actual_income (bool): If True, returns actual income instead of scaled score
     Returns:
-    tuple: (predicted_income, confidence_score)
+    tuple: (repayment_capability_score, confidence_score)
+        repayment_capability_score: Score between 0 and 1 (or actual income if return_actual_income=True)
+        confidence_score: Model confidence in the prediction (0-1)
     """
     input_data = pd.DataFrame([{col: features_dict.get(col, 0) for col in features}])
-    predicted_income = model.predict(input_data)[0]
+    predicted_scaled = model.predict(input_data)[0]
     feature_importance = model.named_steps['regressor'].feature_importances_
     confidence_score = np.mean(feature_importance)
-    return float(predicted_income), float(confidence_score)
+    
+    if return_actual_income:
+        predicted_income = income_scaler.inverse_transform([[predicted_scaled]])[0][0]
+        return float(predicted_income), float(confidence_score)
+    else:
+        return float(predicted_scaled), float(confidence_score)
 
-print("\nExample predictions:")
+print("\nExample predictions (0-1 scale):")
 example1 = {col: 0 for col in features}
 example1.update({
     'var_1': 100, 'var_2': 0.8, 'var_3': 1.0, 'var_4': 500, 'var_5': 0.5,
@@ -94,10 +106,13 @@ example2.update({
     'var_1': 50, 'var_2': 0.3, 'var_3': 0.5, 'var_4': 200, 'var_5': 0.2,
     'age': 25, 'gender': 'F', 'marital_status': 'Single', 'residence_ownership': 'Rent'
 })
+
 for i, example in enumerate([example1, example2], 1):
-    income, confidence = predict_repayment_capability(example)
+    score, confidence = predict_repayment_capability(example)
+    actual_income, _ = predict_repayment_capability(example, return_actual_income=True)
     print(f"\nExample {i}:")
-    print(f"Predicted Income: ₹{income:,.2f}")
+    print(f"Repayment Capability Score (0-1): {score:.3f}")
+    print(f"Actual Predicted Income: ₹{actual_income:,.2f}")
     print(f"Confidence Score: {confidence:.3f}")
     print(f"Demographic Info: Age={example['age']}, Gender={example['gender']}, "
           f"Marital Status={example['marital_status']}, Residence={example['residence_ownership']}") 
