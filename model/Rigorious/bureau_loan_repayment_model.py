@@ -2,15 +2,19 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from xgboost import XGBRegressor
-from sklearn.metrics import mean_squared_error, r2_score
+from xgboost import XGBClassifier
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    confusion_matrix, classification_report, roc_auc_score
+)
 from sklearn.model_selection import GridSearchCV
 import pickle
 import json
+import os
 
 class BureauLoanRepaymentModel:
     def __init__(self):
@@ -19,40 +23,73 @@ class BureauLoanRepaymentModel:
         self.reverse_mapping = None
         self.feature_importance = None
         self.preprocessor = None
+        self.threshold = 0.5  # Default threshold for classification
         
-    def load_column_mapping(self, mapping_file='../../data/participant_col_mapping.csv'):
+        # Set up base paths
+        self.base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.data_dir = os.path.join(self.base_dir, 'data')
+        
+    def load_column_mapping(self, mapping_file=None):
         """Load and create column mappings"""
-        mapping_df = pd.read_csv(mapping_file)
-        self.column_mapping = dict(zip(mapping_df['column_name'], mapping_df['description']))
-        self.reverse_mapping = {v: k for k, v in self.column_mapping.items()}
+        if mapping_file is None:
+            mapping_file = os.path.join(self.data_dir, 'participant_col_mapping.csv')
         
+        try:
+            mapping_df = pd.read_csv(mapping_file)
+            self.column_mapping = dict(zip(mapping_df['column_name'], mapping_df['description']))
+            self.reverse_mapping = {v: k for k, v in self.column_mapping.items()}
+            print(f"Successfully loaded column mapping from {mapping_file}")
+        except FileNotFoundError:
+            print(f"Warning: Column mapping file not found at {mapping_file}")
+            print("Creating default column mapping...")
+            # Create a default mapping if file not found
+            self.column_mapping = {
+                'var_0': 'balance_1',
+                'var_1': 'balance_2',
+                'var_2': 'credit_limit_1',
+                'age': 'age',
+                'gender': 'gender',
+                'marital_status': 'marital_status',
+                'city': 'city',
+                'state': 'state',
+                'residence_ownership': 'residence_ownership'
+            }
+            self.reverse_mapping = {v: k for k, v in self.column_mapping.items()}
+    
     def map_columns(self, df, reverse=False):
         """Map column names using the mapping dictionary"""
         mapping = self.reverse_mapping if reverse else self.column_mapping
         return df.rename(columns=mapping)
     
-    def load_data(self, data_file='../../data/Hackathon_bureau_data_400.csv'):
+    def load_data(self, data_file=None):
         """Load and preprocess the bureau data"""
-        data = pd.read_csv(data_file)
+        if data_file is None:
+            data_file = os.path.join(self.data_dir, 'Hackathon_bureau_data_400.csv')
         
-        # Map column names to their descriptions
-        if self.column_mapping is None:
-            self.load_column_mapping()
-        data = self.map_columns(data)
-        
-        # Drop columns that are not useful for prediction, but keep 'target'
-        columns_to_drop = [
-            'unique_id', 'pin code', 'score_comments', 'score_type', 
-            'device_model', 'device_category', 'platform', 'device_manufacturer'
-        ]
-        columns_to_drop = [col for col in columns_to_drop if col in data.columns and col != 'target']
-        data = data.drop(columns=columns_to_drop, errors='ignore')
-        
-        # Ensure target column exists
-        if 'target' not in data.columns:
-            raise ValueError("Target column 'target' not found in the data after mapping and dropping columns.")
-        
-        return data
+        try:
+            data = pd.read_csv(data_file)
+            print(f"Successfully loaded data from {data_file}")
+            
+            # Map column names to their descriptions
+            if self.column_mapping is None:
+                self.load_column_mapping()
+            data = self.map_columns(data)
+            
+            # Drop columns that are not useful for prediction, but keep 'target'
+            columns_to_drop = [
+                'unique_id', 'pin code', 'score_comments', 'score_type', 
+                'device_model', 'device_category', 'platform', 'device_manufacturer'
+            ]
+            columns_to_drop = [col for col in columns_to_drop if col in data.columns and col != 'target']
+            data = data.drop(columns=columns_to_drop, errors='ignore')
+            
+            # Ensure target column exists
+            if 'target' not in data.columns:
+                raise ValueError("Target column 'target' not found in the data after mapping and dropping columns.")
+            
+            return data
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Data file not found at {data_file}. Please ensure the file exists and the path is correct.")
     
     def engineer_features(self, data):
         """Create new features from the bureau data"""
@@ -94,13 +131,31 @@ class BureauLoanRepaymentModel:
         data['debt_to_income'] = data['total_emi'] / data['target'] if 'total_emi' in data.columns and 'target' in data.columns else 0
         data['credit_utilization_ratio'] = data['avg_credit_utilization'] / data['total_credit_limit'] if 'avg_credit_utilization' in data.columns and 'total_credit_limit' in data.columns else 0
         
+        # Add repayment status features
+        if 'target' in data.columns:
+            # Create binary target based on income threshold (e.g., median income)
+            median_income = data['target'].median()
+            data['repayment_status'] = (data['target'] >= median_income).astype(int)
+            
+            # Add risk-based features
+            data['income_to_loan_ratio'] = data['target'] / (data['total_loan_amount'] + 1)
+            data['income_to_emi_ratio'] = data['target'] / (data['total_emi'] + 1)
+            data['credit_utilization_ratio'] = data['avg_credit_utilization'] / (data['total_credit_limit'] + 1)
+            
+            # Add payment behavior features
+            data['payment_to_income_ratio'] = data['avg_repayment'] / (data['target'] + 1)
+            data['payment_consistency_score'] = 1 / (data['repayment_consistency'] + 1)
+        
         return data
     
     def prepare_features(self, data):
         """Prepare features for model training"""
-        # Separate numeric and categorical features, but exclude 'target'
-        numeric_features = [col for col in data.columns if pd.api.types.is_numeric_dtype(data[col]) and col != 'target']
-        categorical_features = [col for col in data.columns if pd.api.types.is_object_dtype(data[col]) and col != 'target']
+        # Separate numeric and categorical features, but exclude target columns
+        numeric_features = [col for col in data.columns 
+                          if pd.api.types.is_numeric_dtype(data[col]) 
+                          and col not in ['target', 'repayment_status']]
+        categorical_features = [col for col in data.columns 
+                              if pd.api.types.is_object_dtype(data[col])]
         
         # Create preprocessing pipeline
         self.preprocessor = ColumnTransformer(
@@ -109,27 +164,26 @@ class BureauLoanRepaymentModel:
                 ('cat', OneHotEncoder(handle_unknown='ignore'), categorical_features)
             ])
         
-        # Create model pipeline
+        # Create model pipeline with XGBoost Classifier
         self.model = Pipeline(steps=[
             ('preprocessor', self.preprocessor),
-            ('regressor', XGBRegressor(
-                objective='reg:squarederror',
+            ('classifier', XGBClassifier(
+                objective='binary:logistic',
                 random_state=42,
                 n_estimators=200,
                 learning_rate=0.1,
-                max_depth=5
+                max_depth=5,
+                eval_metric='auc'
             ))
         ])
         
         return numeric_features, categorical_features
     
-    def train(self, data_file='../../data/Hackathon_bureau_data_400.csv'):
-        """Train the model with improved pipeline"""
+    def train(self, data_file=None):
+        """Train the model with classification metrics"""
         # Load and preprocess data
         data = self.load_data(data_file)
         print(f"Data shape after loading: {data.shape}")
-        print("\nTarget variable statistics before cleaning:")
-        print(data['target'].describe())
         
         data = self.engineer_features(data)
         print(f"\nData shape after feature engineering: {data.shape}")
@@ -140,99 +194,96 @@ class BureauLoanRepaymentModel:
         print(f"Dropping columns with >50% missing values: {cols_to_drop}")
         data = data.drop(columns=cols_to_drop)
         
-        # Check for problematic values before cleaning
-        print("\nChecking for problematic values:")
-        nan_cols = data.columns[data.isna().any()].tolist()
-        numeric_data = data.select_dtypes(include=np.number)
-        inf_mask = np.isinf(numeric_data).any()
-        inf_cols = numeric_data.columns[inf_mask].tolist()
-        print(f"Columns with NaN values: {nan_cols}")
-        print(f"Columns with inf values: {inf_cols}")
-        
-        # More targeted cleaning approach
+        # Clean data
         data = data.replace([np.inf, -np.inf], np.nan)
         numeric_cols = data.select_dtypes(include=[np.number]).columns
         for col in numeric_cols:
-            if col != 'target':
+            if col not in ['target', 'repayment_status']:
                 median_val = data[col].median()
                 data[col] = data[col].fillna(median_val)
         categorical_cols = data.select_dtypes(include=['object']).columns
         for col in categorical_cols:
             mode_val = data[col].mode()[0]
             data[col] = data[col].fillna(mode_val)
-        data = data.dropna(subset=['target'])
-        print(f"\nData shape after cleaning: {data.shape}")
-        print("\nTarget variable statistics after cleaning:")
-        print(data['target'].describe())
+        data = data.dropna(subset=['target', 'repayment_status'])
         
-        # Log-transform target and key numeric features
-        data['target_log'] = np.log1p(data['target'])
-        for col in ['total_loan_amount', 'total_credit_limit', 'total_emi', 'income', 'loan_amt_1', 'loan_amt_2']:
-            if col in data.columns:
-                data[col + '_log'] = np.log1p(data[col])
+        # Prepare features (initialize model pipeline)
+        numeric_features, categorical_features = self.prepare_features(data)
         
-        # Prepare features (exclude original target)
-        features = [col for col in data.columns if col not in ['target', 'target_log']]
+        # Prepare features
+        features = [col for col in data.columns 
+                   if col not in ['target', 'repayment_status']]
         X = data[features]
-        y = data['target_log']
+        y = data['repayment_status']
         
-        # Identify numeric and categorical features
-        numeric_features = [col for col in X.columns if pd.api.types.is_numeric_dtype(X[col])]
-        categorical_features = [col for col in X.columns if pd.api.types.is_object_dtype(X[col])]
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y
+        )
         
-        # Preprocessing pipeline
-        self.preprocessor = ColumnTransformer(
-            transformers=[
-                ('num', StandardScaler(), numeric_features),
-                ('cat', OneHotEncoder(handle_unknown='ignore'), categorical_features)
-            ])
-        
-        # Model pipeline
-        self.model = Pipeline(steps=[
-            ('preprocessor', self.preprocessor),
-            ('regressor', XGBRegressor(objective='reg:squarederror', random_state=42))
-        ])
-        
-        # Hyperparameter tuning with GridSearchCV
+        # Hyperparameter tuning
         param_grid = {
-            'regressor__max_depth': [3, 5, 7],
-            'regressor__learning_rate': [0.01, 0.05, 0.1],
-            'regressor__n_estimators': [100, 200]
+            'classifier__max_depth': [3, 5, 7],
+            'classifier__learning_rate': [0.01, 0.05, 0.1],
+            'classifier__n_estimators': [100, 200],
+            'classifier__min_child_weight': [1, 3, 5],
+            'classifier__subsample': [0.8, 0.9, 1.0]
         }
-        grid_search = GridSearchCV(self.model, param_grid, cv=5, scoring='r2', n_jobs=-1, verbose=1)
-        grid_search.fit(X, y)
+        
+        grid_search = GridSearchCV(
+            self.model, param_grid, cv=5, 
+            scoring='f1', n_jobs=-1, verbose=1
+        )
+        grid_search.fit(X_train, y_train)
         self.model = grid_search.best_estimator_
         print(f"\nBest parameters: {grid_search.best_params_}")
         
-        # Cross-validation score
-        from sklearn.model_selection import cross_val_score
-        cv_scores = cross_val_score(self.model, X, y, cv=5, scoring='r2')
-        print(f"\nCross-validation R2 scores: {cv_scores}")
-        print(f"Average CV R2 score: {cv_scores.mean():.3f} (+/- {cv_scores.std() * 2:.3f})")
+        # Evaluate model
+        y_pred = self.model.predict(X_test)
+        y_pred_proba = self.model.predict_proba(X_test)[:, 1]
         
-        # Evaluate on a hold-out set
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-        self.model.fit(X_train, y_train)
-        y_pred_log = self.model.predict(X_test)
-        y_pred = np.expm1(y_pred_log)
-        y_test_actual = np.expm1(y_test)
-        rmse = np.sqrt(mean_squared_error(y_test_actual, y_pred))
-        r2 = r2_score(y_test_actual, y_pred)
-        print(f"\nModel Performance on Hold-out Set:")
-        print(f"RMSE: {rmse:.2f}")
-        print(f"R² Score: {r2:.4f}")
+        # Calculate metrics
+        accuracy = accuracy_score(y_test, y_pred)
+        precision = precision_score(y_test, y_pred)
+        recall = recall_score(y_test, y_pred)
+        f1 = f1_score(y_test, y_pred)
+        auc = roc_auc_score(y_test, y_pred_proba)
+        
+        print("\nModel Performance Metrics:")
+        print(f"Accuracy: {accuracy:.4f}")
+        print(f"Precision: {precision:.4f}")
+        print(f"Recall: {recall:.4f}")
+        print(f"F1 Score: {f1:.4f}")
+        print(f"AUC-ROC: {auc:.4f}")
+        
+        # Print classification report
+        print("\nClassification Report:")
+        print(classification_report(y_test, y_pred))
+        
+        # Plot confusion matrix
+        cm = confusion_matrix(y_test, y_pred)
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+        plt.title('Confusion Matrix')
+        plt.ylabel('True Label')
+        plt.xlabel('Predicted Label')
+        plt.show()
         
         # Store feature importances
-        feature_importances = self.model.named_steps['regressor'].feature_importances_
-        feature_names = numeric_features + self.model.named_steps['preprocessor'].named_transformers_['cat'].get_feature_names_out(categorical_features).tolist()
+        feature_importances = self.model.named_steps['classifier'].feature_importances_
+        feature_names = (numeric_features + 
+                        self.model.named_steps['preprocessor']
+                        .named_transformers_['cat']
+                        .get_feature_names_out(categorical_features).tolist())
+        
         self.feature_importance = pd.DataFrame({
             'Feature': feature_names,
             'Importance': feature_importances
         }).sort_values('Importance', ascending=False)
         
-        return rmse, r2
+        return accuracy, precision, recall, f1, auc
     
-    def predict(self, input_data):
+    def predict(self, input_data, return_proba=False):
         """Make predictions for new data"""
         if isinstance(input_data, dict):
             input_data = pd.DataFrame([input_data])
@@ -252,8 +303,23 @@ class BureauLoanRepaymentModel:
         input_data = input_data[model_features]
         
         # Make prediction
-        prediction = self.model.predict(input_data)
+        if return_proba:
+            prediction = self.model.predict_proba(input_data)[:, 1]
+        else:
+            prediction = self.model.predict(input_data)
+        
         return prediction[0]
+    
+    def set_threshold(self, threshold):
+        """Set custom threshold for classification"""
+        if not 0 <= threshold <= 1:
+            raise ValueError("Threshold must be between 0 and 1")
+        self.threshold = threshold
+    
+    def predict_with_threshold(self, input_data):
+        """Make predictions using custom threshold"""
+        proba = self.predict(input_data, return_proba=True)
+        return int(proba >= self.threshold)
     
     def save_model(self, model_path='bureau_loan_repayment_model.pkl'):
         """Save the model and related information"""
@@ -293,29 +359,57 @@ class BureauLoanRepaymentModel:
 
 # Example usage
 if __name__ == "__main__":
-    # Initialize and train model
-    model = BureauLoanRepaymentModel()
-    model.load_column_mapping()
-    rmse, r2 = model.train()
-    
-    # Plot feature importance
-    model.plot_feature_importance()
-    
-    # Save model
-    model.save_model()
-    
-    # Example prediction
-    example_applicant = {
-        'var_0': -0.13,  # balance_1
-        'var_1': -0.45,  # balance_2
-        'var_2': -0.26,  # credit_limit_1
-        'age': 35,
-        'gender': 'MALE',
-        'marital_status': 'MARRIED',
-        'city': 'Mumbai',
-        'state': 'Maharashtra',
-        'residence_ownership': 'SELF-OWNED'
-    }
-    
-    prediction = model.predict(example_applicant)
-    print(f"\nPredicted income for example applicant: {prediction:.2f}") 
+    try:
+        # Initialize and train model
+        model = BureauLoanRepaymentModel()
+        print("\nInitializing model...")
+        
+        # Load column mapping
+        print("\nLoading column mapping...")
+        model.load_column_mapping()
+        
+        # Train model
+        print("\nTraining model...")
+        accuracy, precision, recall, f1, auc = model.train()
+        
+        # Plot feature importance
+        print("\nPlotting feature importance...")
+        model.plot_feature_importance()
+        
+        # Save model
+        print("\nSaving model...")
+        model.save_model()
+        
+        # Example prediction
+        print("\nMaking example prediction...")
+        example_applicant = {
+            'var_0': -0.13,  # balance_1
+            'var_1': -0.45,  # balance_2
+            'var_2': -0.26,  # credit_limit_1
+            'age': 35,
+            'gender': 'MALE',
+            'marital_status': 'MARRIED',
+            'city': 'Mumbai',
+            'state': 'Maharashtra',
+            'residence_ownership': 'SELF-OWNED'
+        }
+        
+        # Get prediction and probability
+        prediction = model.predict(example_applicant)
+        probability = model.predict(example_applicant, return_proba=True)
+        
+        print(f"\nPrediction for example applicant:")
+        print(f"Repayment Status: {'Good' if prediction == 1 else 'Bad'}")
+        print(f"Probability of Good Repayment: {probability:.4f}")
+        
+        # Try different threshold
+        model.set_threshold(0.7)  # More conservative threshold
+        prediction_threshold = model.predict_with_threshold(example_applicant)
+        print(f"\nPrediction with 0.7 threshold:")
+        print(f"Repayment Status: {'Good' if prediction_threshold == 1 else 'Bad'}")
+        
+    except Exception as e:
+        print(f"\nError: {str(e)}")
+        print("\nStack trace:")
+        import traceback
+        traceback.print_exc() 

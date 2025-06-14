@@ -1,79 +1,87 @@
-# Income Estimation Model - Team Average
+# Income Prediction Model
 
-This repository contains the implementation of an income estimation model developed by Team Average for the hackathon.
+## Problem Statement
+This project aims to predict an individual's income based on their credit bureau data and demographic information. The model uses various features such as credit utilization, loan behavior, credit limits, EMI payments, and demographic data to make accurate income predictions.
 
-## Project Structure
+## Dataset
+The model is trained on credit bureau data containing various financial and demographic features. The dataset includes:
+- Credit utilization metrics
+- Loan behavior patterns
+- Credit limits and EMI information
+- Demographic information (age, gender, location, etc.)
+- Credit scores and risk indicators
 
-```
-income_estimation_Team_Average_submission/
-├── main.py              # Training script
-├── run_inference.py     # Inference script for judging
-├── requirements.txt     # Project dependencies
-├── config/
-│   └── config.json     # Configuration parameters
-├── data/
-│   └── Hackathon_bureau_data_400.csv
-├── output/
-│   └── output_Hackathon_bureau_data_400.csv
-└── .env                # Environment variables (not committed)
-```
+The data is preprocessed to handle missing values, outliers, and categorical variables before training.
 
-## Setup Instructions
+## Model Architecture
+The income prediction model uses a pipeline approach with the following components:
 
-1. Create a virtual environment (recommended):
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Linux/Mac
-   # or
-   .\venv\Scripts\activate  # On Windows
-   ```
+1. **Preprocessing**:
+   - Standard scaling for numerical features
+   - One-hot encoding for categorical features
+   - Feature engineering for derived metrics
 
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+2. **Model**: XGBoost Regressor with the following key features:
+   - Log-transformed target variable for better prediction
+   - Hyperparameter tuning using GridSearchCV
+   - Feature importance analysis
+   - Cross-validation for robust performance
 
-3. Create a `.env` file in the root directory for any required API keys (if applicable)
+## Performance Metrics
+The model is evaluated using:
+- RMSE (Root Mean Square Error)
+- R² Score (Coefficient of Determination)
 
-## Usage
+## How to Run
 
-### Training the Model
-
-To train the model:
+### Local Development
+1. Install dependencies:
 ```bash
-python main.py
+pip install -r requirements.txt
 ```
 
-This will:
-- Load and preprocess the data
-- Train the model
-- Save the trained model
-- Output performance metrics
-
-### Running Inference
-
-To run inference on new data:
+2. Train the model:
 ```bash
-python run_inference.py
+python income_prediction_model.py
 ```
 
-This will:
-- Load the trained model
-- Process the input data
-- Generate predictions
-- Save the predictions to the output file
+### FastAPI Server
+1. Start the FastAPI server:
+```bash
+uvicorn inference:app --reload
+```
 
-## Model Details
+2. Access the API documentation at `http://localhost:8000/docs`
 
-- Model Type: Random Forest Regressor
-- Features: [To be added after feature engineering]
-- Target Variable: Income
-- Performance Metrics: MSE, RMSE, R²
+### API Endpoints
+- `POST /predict`: Make income predictions
+  - Input: JSON with applicant details
+  - Output: Predicted income
 
-## Team Members
+Example request:
+```json
+{
+    "age": 35,
+    "gender": "MALE",
+    "marital_status": "MARRIED",
+    "city": "Mumbai",
+    "state": "Maharashtra",
+    "residence_ownership": "SELF-OWNED",
+    "credit_score": 750,
+    "total_loan_amount": 500000,
+    "total_credit_limit": 1000000,
+    "total_emi": 15000
+}
+```
 
-[Add team members here]
+## Model Files
+- `income_prediction_model.py`: Main model implementation
+- `inference.py`: FastAPI server for model deployment
+- `requirements.txt`: Project dependencies
+- `data/`: Directory containing training data and column mappings
 
-## License
-
-[Add license information here]
+## Future Improvements
+- Integration with AWS SageMaker for production deployment
+- Additional feature engineering
+- Model versioning and monitoring
+- API authentication and rate limiting
