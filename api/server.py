@@ -1,203 +1,261 @@
 import os
 import sys
-
-# Add the project root directory to Python path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import Dict, Optional
+import logging
+from pathlib import Path
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, validator
+from typing import Dict, Optional, Union, List
 import pickle
 import pandas as pd
 import numpy as np
-import logging
-from model.repayment_capability_model import predict_repayment_capability
+from model.Rigorious.bureau_loan_repayment_model import BureauLoanRepaymentModel
+
+# Add project root to Python path
+project_root = Path(__file__).parent.parent
+sys.path.append(str(project_root))
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(sys.stdout)
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(project_root / 'api.log')
     ]
 )
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Financial Prediction API",
-    description="API for predicting customer repayment capability and income",
+    description="API for predicting bureau loan repayment and income",
     version="1.0.0"
 )
 
-# Load both models
-try:
-    logger.info("Attempting to load repayment model...")
-    with open('model/repayment_capability_model.pkl', 'rb') as f:
-        repayment_model, repayment_scaler = pickle.load(f)
-    logger.info("Successfully loaded repayment model")
-    
-    logger.info("Attempting to load income model...")
-    with open('model/income_prediction_model.pkl', 'rb') as f:
-        income_model, income_scaler = pickle.load(f)
-    logger.info("Successfully loaded income model")
-except FileNotFoundError as e:
-    logger.error(f"Model file not found: {e}")
-    repayment_model = None
-    repayment_scaler = None
+# Model instances
+bureau_model = None
     income_model = None
     income_scaler = None
-except Exception as e:
-    logger.error(f"Error loading models: {e}")
-    repayment_model = None
-    repayment_scaler = None
-    income_model = None
-    income_scaler = None
+
+# Request/Response Models
+class Features(BaseModel):
+    var_0: float = Field(..., description="Balance 1")
+    var_1: float = Field(..., description="Balance 2")
+    var_2: float = Field(..., description="Credit limit 1")
+    age: int = Field(..., ge=18, le=100, description="Age of the applicant")
+    gender: str = Field(..., description="Gender of the applicant")
+    marital_status: str = Field(..., description="Marital status of the applicant")
+    city: str = Field(..., description="City of residence")
+    state: str = Field(..., description="State of residence")
+    residence_ownership: str = Field(..., description="Residence ownership status")
+
+    @validator('gender')
+    def validate_gender(cls, v):
+        valid_genders = ['MALE', 'FEMALE', 'OTHER']
+        if v.upper() not in valid_genders:
+            raise ValueError(f'Gender must be one of {valid_genders}')
+        return v.upper()
+
+    @validator('marital_status')
+    def validate_marital_status(cls, v):
+        valid_statuses = ['SINGLE', 'MARRIED', 'DIVORCED', 'WIDOWED']
+        if v.upper() not in valid_statuses:
+            raise ValueError(f'Marital status must be one of {valid_statuses}')
+        return v.upper()
+
+    @validator('residence_ownership')
+    def validate_residence_ownership(cls, v):
+        valid_types = ['SELF-OWNED', 'RENTED', 'PARENTAL', 'COMPANY-PROVIDED']
+        if v.upper() not in valid_types:
+            raise ValueError(f'Residence ownership must be one of {valid_types}')
+        return v.upper()
 
 class PredictionRequest(BaseModel):
-    features: Dict[str, float | str]
-    return_actual_values: Optional[bool] = False
+    features: Features
+    threshold: Optional[float] = Field(0.5, ge=0.0, le=1.0, description="Threshold for bureau loan repayment prediction")
 
-class PredictionResponse(BaseModel):
-    repayment_capability_score: float
-    predicted_income: float
-    confidence_score: float
-    actual_repayment_score: Optional[float] = None
-    actual_income: Optional[float] = None
+class BureauResponse(BaseModel):
+    prediction: int = Field(..., description="Predicted repayment status (1 for Good, 0 for Bad)")
+    probability: float = Field(..., ge=0.0, le=1.0, description="Probability of good repayment")
+    status: str = Field(..., description="Predicted repayment status (Good/Bad)")
+    threshold: float = Field(..., description="Threshold used for prediction")
+
+class IncomeResponse(BaseModel):
+    predicted_income: float = Field(..., ge=0.0, description="Predicted income")
+    confidence_score: float = Field(..., ge=0.0, le=1.0, description="Confidence score of the prediction")
+
+class CombinedResponse(BaseModel):
+    bureau_prediction: BureauResponse
+    income_prediction: IncomeResponse
+
+class ErrorResponse(BaseModel):
+    detail: str
+    error_type: str
+
+# Exception handlers
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Global error handler caught: {str(exc)}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content=ErrorResponse(
+            detail=str(exc),
+            error_type=exc.__class__.__name__
+        ).dict()
+    )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    logger.error(f"HTTP error handler caught: {str(exc)}")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=ErrorResponse(
+            detail=exc.detail,
+            error_type="HTTPException"
+        ).dict()
+    )
+
+# Load models on startup
+@app.on_event("startup")
+async def startup_event():
+    global bureau_model, income_model, income_scaler
+    
+    try:
+        # Initialize bureau model
+        logger.info("Loading bureau loan repayment model...")
+        bureau_model = BureauLoanRepaymentModel()
+        bureau_model.load_column_mapping()
+        
+        bureau_model_path = project_root / 'model' / 'Rigorious' / 'bureau_loan_repayment_model.pkl'
+        try:
+            bureau_model.load_model(str(bureau_model_path))
+            logger.info("Successfully loaded bureau model")
+        except FileNotFoundError:
+            logger.info("Training new bureau model...")
+            bureau_model.train()
+            bureau_model.save_model(str(bureau_model_path))
+            logger.info("Successfully trained and saved bureau model")
+
+        # Load income model
+        logger.info("Loading income prediction model...")
+        income_model_path = project_root / 'model' / 'Rigorious' / 'income_prediction_model.pkl'
+        try:
+            with open(income_model_path, 'rb') as f:
+                income_model, income_scaler = pickle.load(f)
+            logger.info("Successfully loaded income model")
+        except FileNotFoundError:
+            logger.error(f"Income prediction model not found at {income_model_path}")
+            income_model = None
+            income_scaler = None
+
+    except Exception as e:
+        logger.error(f"Error during startup: {e}", exc_info=True)
+        raise
 
 @app.get("/")
 async def root():
     return {
         "message": "Financial Prediction API is running",
+        "version": "1.0.0",
         "endpoints": {
-            "repayment": "/predict/repayment",
+            "bureau": "/predict/bureau",
             "income": "/predict/income",
-            "combined": "/predict/combined"
+            "combined": "/predict/combined",
+            "health": "/health"
         }
     }
 
 @app.get("/health")
 async def health_check():
     models_status = {
-        "repayment_model": repayment_model is not None,
-        "income_model": income_model is not None
+        "bureau_model": bureau_model is not None,
+        "income_model": income_model is not None and income_scaler is not None
     }
     if not all(models_status.values()):
         raise HTTPException(
             status_code=503,
             detail=f"Models not loaded: {models_status}"
         )
-    return {"status": "healthy", "models_loaded": models_status}
+    return {
+        "status": "healthy",
+        "models_loaded": models_status,
+        "version": "1.0.0"
+    }
 
-@app.post("/predict/repayment", response_model=PredictionResponse)
-async def predict_repayment(request: PredictionRequest):
-    if repayment_model is None or repayment_scaler is None:
-        raise HTTPException(status_code=503, detail="Repayment model not loaded")
+@app.post("/predict/bureau", response_model=BureauResponse)
+async def predict_bureau(request: PredictionRequest):
+    if bureau_model is None:
+        raise HTTPException(status_code=503, detail="Bureau model not loaded")
     
     try:
-        # Get repayment prediction
-        score, confidence = predict_repayment_capability(
-            request.features,
-            return_actual_income=request.return_actual_values
-        )
+        # Convert features to dict
+        features_dict = request.features.dict()
         
-        # If return_actual_values is True, score is already the actual value
-        if request.return_actual_values:
-            actual_score = score
-            score = repayment_scaler.transform([[actual_score]])[0][0]
-        else:
-            actual_score = repayment_scaler.inverse_transform([[score]])[0][0]
+        # Set custom threshold if provided
+        if request.threshold is not None:
+            bureau_model.set_threshold(request.threshold)
         
-        return PredictionResponse(
-            repayment_capability_score=float(score),
-            predicted_income=0.0,  # Not applicable for repayment endpoint
-            confidence_score=float(confidence),
-            actual_repayment_score=float(actual_score),
-            actual_income=None
+        # Get prediction
+        prediction = bureau_model.predict(features_dict)
+        probability = bureau_model.predict(features_dict, return_proba=True)
+        
+        return BureauResponse(
+            prediction=int(prediction),
+            probability=float(probability),
+            status="Good" if prediction == 1 else "Bad",
+            threshold=float(bureau_model.threshold)
         )
     
     except Exception as e:
+        logger.error(f"Error in bureau prediction: {e}", exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
 
-@app.post("/predict/income", response_model=PredictionResponse)
+@app.post("/predict/income", response_model=IncomeResponse)
 async def predict_income(request: PredictionRequest):
     if income_model is None or income_scaler is None:
         raise HTTPException(status_code=503, detail="Income model not loaded")
     
     try:
-        # Get income prediction
-        input_data = pd.DataFrame([request.features])
+        # Convert features to DataFrame
+        features_dict = request.features.dict()
+        input_data = pd.DataFrame([features_dict])
+        
+        # Get prediction
         predicted_scaled = income_model.predict(input_data)[0]
         confidence = np.mean(income_model.feature_importances_)
         
-        # Convert to actual income if requested
-        if request.return_actual_values:
-            actual_income = income_scaler.inverse_transform([[predicted_scaled]])[0][0]
-            predicted_scaled = income_scaler.transform([[actual_income]])[0][0]
-        else:
+        # Convert to actual income
             actual_income = income_scaler.inverse_transform([[predicted_scaled]])[0][0]
         
-        return PredictionResponse(
-            repayment_capability_score=0.0,  # Not applicable for income endpoint
-            predicted_income=float(predicted_scaled),
-            confidence_score=float(confidence),
-            actual_repayment_score=None,
-            actual_income=float(actual_income)
+        return IncomeResponse(
+            predicted_income=float(actual_income),
+            confidence_score=float(confidence)
         )
     
     except Exception as e:
+        logger.error(f"Error in income prediction: {e}", exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
 
-@app.post("/predict/combined", response_model=PredictionResponse)
+@app.post("/predict/combined", response_model=CombinedResponse)
 async def predict_combined(request: PredictionRequest):
-    if (repayment_model is None or repayment_scaler is None or 
-        income_model is None or income_scaler is None):
+    if bureau_model is None or income_model is None or income_scaler is None:
         raise HTTPException(status_code=503, detail="Models not loaded")
     
     try:
-        # Get repayment prediction
-        repayment_score, repayment_confidence = predict_repayment_capability(
-            request.features,
-            return_actual_income=request.return_actual_values
-        )
+        # Get bureau prediction
+        bureau_response = await predict_bureau(request)
         
         # Get income prediction
-        input_data = pd.DataFrame([request.features])
-        income_scaled = income_model.predict(input_data)[0]
-        income_confidence = np.mean(income_model.feature_importances_)
+        income_response = await predict_income(request)
         
-        # Convert values if requested
-        if request.return_actual_values:
-            actual_repayment = repayment_score
-            actual_income = income_scaler.inverse_transform([[income_scaled]])[0][0]
-            repayment_score = repayment_scaler.transform([[actual_repayment]])[0][0]
-            income_scaled = income_scaler.transform([[actual_income]])[0][0]
-        else:
-            actual_repayment = repayment_scaler.inverse_transform([[repayment_score]])[0][0]
-            actual_income = income_scaler.inverse_transform([[income_scaled]])[0][0]
-        
-        # Average confidence scores
-        combined_confidence = (repayment_confidence + income_confidence) / 2
-        
-        return PredictionResponse(
-            repayment_capability_score=float(repayment_score),
-            predicted_income=float(income_scaled),
-            confidence_score=float(combined_confidence),
-            actual_repayment_score=float(actual_repayment),
-            actual_income=float(actual_income)
+        return CombinedResponse(
+            bureau_prediction=bureau_response,
+            income_prediction=income_response
         )
     
     except Exception as e:
+        logger.error(f"Error in combined prediction: {e}", exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
-
-@app.get("/feature-list")
-async def get_feature_list():
-    """Return the list of required features for prediction"""
-    from model.repayment_capability_model import features as repayment_features
-    # Assuming income model uses the same features
-    return {
-        "features": repayment_features,
-        "note": "Both models use the same feature set"
-    }
 
 if __name__ == "__main__":
     import uvicorn
@@ -210,5 +268,5 @@ if __name__ == "__main__":
             log_level="info"
         )
     except Exception as e:
-        logger.error(f"Failed to start server: {e}")
+        logger.error(f"Failed to start server: {e}", exc_info=True)
         sys.exit(1) 
