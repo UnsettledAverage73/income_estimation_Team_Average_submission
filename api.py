@@ -9,6 +9,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 import xgboost as xgb
+import joblib
 
 # --- Load (or Train) Repayment Capability Model ---
 repayment_model_path = 'repayment_capability_model.pkl'
@@ -111,4 +112,69 @@ if __name__ == "__main__":
         print(f"Test prediction error: {e}")
 
     # (Optional) start the FastAPI server (using uvicorn) if run as a script.
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+# Import the validation and prediction logic from example_usage.py
+from example_usage import validate_and_prepare_input, predict_income, load_model_and_preprocessor
+
+app = FastAPI(title="Income Prediction API")
+
+# Load model and preprocessor at startup
+# Use joblib for the preprocessor (more robust for sklearn objects) and pickle for the model if needed
+try:
+    model, preprocessor = load_model_and_preprocessor()
+    # Alternatively, if you saved the preprocessor with joblib, load it like this:
+    # preprocessor = joblib.load("preprocessor.joblib")
+    # model = pickle.load(open("ensemble_model.pkl", "rb"))
+    print("Model and preprocessor loaded successfully.")
+except Exception as e:
+    print(f"Error loading model or preprocessor: {e}")
+
+# Define a Pydantic model for the input
+class IncomeInput(BaseModel):
+    age: int
+    gender: str
+    marital_status: str
+    city: str
+    state: str
+    residence_ownership: str
+    credit_score: Optional[float] = None
+    credit_limit_1: Optional[float] = None
+    balance_1: Optional[float] = None
+    total_emi_1: Optional[float] = None
+    total_inquiries_1: Optional[float] = None
+    loan_amt_1: Optional[float] = None
+    repayment_1: Optional[float] = None
+    device_category: Optional[str] = None
+    device_manufacturer: Optional[str] = None
+    device_model: Optional[str] = None
+    platform: Optional[str] = None
+    score_type: Optional[str] = None
+    score_comments: Optional[str] = None
+    # Simulated/external features
+    digital_literacy_score: Optional[float] = None
+    ecommerce_purchase_frequency: Optional[float] = None
+    digital_service_subscriptions: Optional[float] = None
+    upi_transaction_frequency: Optional[float] = None
+    total_loan_recent_is_missing: Optional[int] = None
+    market_density_score: Optional[float] = None
+    app_diversity_count: Optional[float] = None
+    mobile_recharge_frequency: Optional[float] = None
+    bill_payment_consistency: Optional[float] = None
+    night_light_intensity: Optional[float] = None
+    local_literacy_rate: Optional[float] = None
+    total_loan_recent: Optional[float] = None
+    # Allow extra fields for flexibility
+    class Config:
+        extra = "allow"
+
+@app.post("/predict_income")
+def predict_income_endpoint(input_data: IncomeInput):
+    try:
+        # Convert input to dict
+        input_dict = input_data.dict()
+        # Use the same validation and prediction logic as the script
+        result = predict_income(input_dict, model, preprocessor)
+        return {"success": True, "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e)) 

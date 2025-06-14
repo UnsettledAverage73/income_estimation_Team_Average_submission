@@ -43,6 +43,7 @@ import pickle
 import json
 import shap
 import optuna # Import Optuna for Bayesian Optimization
+import joblib
 
 # Install category_encoders if not already installed for Target Encoding
 try:
@@ -656,13 +657,42 @@ except Exception as e:
 
 # --- Optional: Save Ensemble Model and Preprocessor ---
 try:
-    with open('ensemble_model.pkl', 'wb') as f:
+    with open("ensemble_model.pkl", "wb") as f:
         pickle.dump(ensemble_model, f)
     print("\n✅ Ensemble model saved as ensemble_model.pkl")
 
-    with open('preprocessor.pkl', 'wb') as f:
-        pickle.dump(preprocessor, f)
-    print("✅ Preprocessor saved as preprocessor.pkl")
+    # Save the preprocessor using joblib (more robust for sklearn objects)
+    joblib.dump(preprocessor, "preprocessor.joblib")
+    print("✅ Preprocessor saved as preprocessor.joblib")
 except Exception as e:
     print(f"Error saving model or preprocessor: {e}")
+
+
+complete_data = {
+    'age': 35,
+    'gender': 'M',
+    'marital_status': 'Married',
+    'city': 'Mumbai',
+    'state': 'Maharashtra',
+    'residence_ownership': 'Owned',
+    'credit_score': 750,
+    'credit_limit_1': 50000,
+    'balance_1': 25000,
+    'total_emi_1': 5000,
+    'total_inquiries_1': 2,
+    'loan_amt_1': 200000,
+    'repayment_1': 4500,
+    'digital_literacy_score': 0.85,
+    'ecommerce_purchase_frequency': 10,
+    'digital_service_subscriptions': 3,
+    'upi_transaction_frequency': 25,
+    'total_loan_recent_is_missing': 0,
+    'market_density_score': 0.8,
+    'app_diversity_count': 25,
+    'mobile_recharge_frequency': 5,
+    'bill_payment_consistency': 0.9,
+    'night_light_intensity': 75.5,
+    'local_literacy_rate': 85.0,
+    'total_loan_recent': 0  # or a realistic value
+}
 
